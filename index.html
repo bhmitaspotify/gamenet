@@ -366,6 +366,7 @@ async function bootApp(){
   render();
   setInterval(()=>{
     if (!state.staff) return;
+    if (state.modal) return;
     const ae = document.activeElement;
     if (ae && (ae.tagName==='INPUT' || ae.tagName==='TEXTAREA')) return;
     render();
@@ -587,15 +588,15 @@ function renderModal(){
     body = `
       <div class="head"><h3>ورود ${label}</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
       <label>رمز عبور</label>
-      <input type="password" id="loginPass" inputmode="numeric">
-      <button class="btn block" style="margin-top:12px" onclick="safe(()=>login('${m.user}', document.getElementById('loginPass').value))">ورود</button>`;
+      <input type="password" id="loginPass" inputmode="numeric" value="${m.pass||''}" oninput="state.modal.pass=this.value">
+      <button class="btn block" style="margin-top:12px" onclick="safe(()=>login('${m.user}', state.modal.pass||''))">ورود</button>`;
   }
   else if (m.type==='profile'){
     body = `
       <div class="head"><h3>${state.staff.display_name}</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
       <label>رمز جدید</label>
-      <input type="password" id="newPass" inputmode="numeric">
-      <button class="btn block" style="margin-top:10px" onclick="safe(()=>changePassword(document.getElementById('newPass').value))">تغییر رمز</button>
+      <input type="password" id="newPass" inputmode="numeric" value="${m.newPass||''}" oninput="state.modal.newPass=this.value">
+      <button class="btn block" style="margin-top:10px" onclick="safe(()=>changePassword(state.modal.newPass||''))">تغییر رمز</button>
       <button class="btn danger block" style="margin-top:10px" onclick="logout(); closeModal();">خروج از حساب</button>`;
   }
   else if (m.type==='start'){
@@ -635,13 +636,14 @@ function renderModal(){
           <span>${toman(it.price)} <button class="btn danger small" onclick="safe(()=>removeCafeItem(${m.sessionId}, ${idx}))">حذف</button></span>
         </div>`).join('') || '<div class="muted">آیتمی ثبت نشده</div>'}
       <label style="margin-top:12px">نام آیتم</label>
-      <input type="text" id="cafeName">
+      <input type="text" id="cafeName" value="${m.cafeName||''}" oninput="state.modal.cafeName=this.value">
       <label style="margin-top:8px">قیمت (تومان)</label>
-      <input type="number" id="cafePrice">
+      <input type="number" id="cafePrice" value="${m.cafePrice||''}" oninput="state.modal.cafePrice=this.value">
       <button class="btn block" style="margin-top:12px" onclick="safe(()=>{
-        const n=document.getElementById('cafeName').value.trim();
-        const p=Number(document.getElementById('cafePrice').value||0);
+        const n=(state.modal.cafeName||'').trim();
+        const p=Number(state.modal.cafePrice||0);
         if(!n||!p){ showToast('نام و قیمت را وارد کنید'); return; }
+        state.modal.cafeName=''; state.modal.cafePrice='';
         return addCafeItem(${m.sessionId}, n, p);
       })">افزودن</button>`;
   }
@@ -671,18 +673,18 @@ function renderModal(){
       <div class="head"><h3>تسویه بدهی — ${c.name}</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
       <div class="muted">بدهی فعلی: ${toman(c.debt)}</div>
       <label style="margin-top:10px">مبلغ پرداختی</label>
-      <input type="number" id="settleAmt" value="${c.debt}">
-      <button class="btn success block" style="margin-top:12px" onclick="safe(()=>settleDebt(${c.id}, Number(document.getElementById('settleAmt').value||0)))">ثبت تسویه</button>`;
+      <input type="number" id="settleAmt" value="${m.amt!==undefined?m.amt:c.debt}" oninput="state.modal.amt=this.value">
+      <button class="btn success block" style="margin-top:12px" onclick="safe(()=>settleDebt(${c.id}, Number((state.modal.amt!==undefined?state.modal.amt:${c.debt})||0)))">ثبت تسویه</button>`;
   }
   else if (m.type==='newCustomer'){
     body = `
       <div class="head"><h3>مشتری جدید</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
-      <label>نام</label><input type="text" id="newCustName">
-      <label style="margin-top:8px">شماره تماس (اختیاری)</label><input type="tel" id="newCustPhone">
+      <label>نام</label><input type="text" id="newCustName" value="${m.name||''}" oninput="state.modal.name=this.value">
+      <label style="margin-top:8px">شماره تماس (اختیاری)</label><input type="tel" id="newCustPhone" value="${m.phone||''}" oninput="state.modal.phone=this.value">
       <button class="btn block" style="margin-top:12px" onclick="safe(async()=>{
-        const n=document.getElementById('newCustName').value.trim();
+        const n=(state.modal.name||'').trim();
         if(!n){ showToast('نام را وارد کنید'); return; }
-        await createCustomer(n, document.getElementById('newCustPhone').value.trim());
+        await createCustomer(n, (state.modal.phone||'').trim());
         closeModal();
       })">ثبت مشتری</button>`;
   }
