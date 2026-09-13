@@ -364,7 +364,12 @@ async function bootApp(){
   });
   state.loading = false;
   render();
-  setInterval(()=>{ if(state.staff) render(); }, 1000);
+  setInterval(()=>{
+    if (!state.staff) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName==='INPUT' || ae.tagName==='TEXTAREA')) return;
+    render();
+  }, 1000);
   setInterval(()=>{ if(state.staff) safe(async()=>{
     await loadActiveSessions();
     if (state.tab==='customers') await loadCustomers();
@@ -686,25 +691,39 @@ function renderModal(){
 
 function render(){
   const root = document.getElementById('root');
+  const ae = document.activeElement;
+  const isTyping = ae && root.contains(ae) && (ae.tagName==='INPUT' || ae.tagName==='TEXTAREA');
+  const focusInfo = isTyping ? { id: ae.id, start: ae.selectionStart, end: ae.selectionEnd } : null;
+
   if (!state.staff){
     root.innerHTML = renderLogin() + renderModal();
-    return;
-  }
-  let content = '';
-  if (state.loading) content = '<div class="muted" style="padding:20px;text-align:center">در حال بارگذاری...</div>';
-  else if (state.tab==='dashboard') content = renderDashboard();
-  else if (state.tab==='customers') content = renderCustomers();
-  else if (state.tab==='devices') content = renderDevices();
-  else if (state.tab==='history') content = renderHistory();
-  else if (state.tab==='reports') content = renderReports();
+  } else {
+    let content = '';
+    if (state.loading) content = '<div class="muted" style="padding:20px;text-align:center">در حال بارگذاری...</div>';
+    else if (state.tab==='dashboard') content = renderDashboard();
+    else if (state.tab==='customers') content = renderCustomers();
+    else if (state.tab==='devices') content = renderDevices();
+    else if (state.tab==='history') content = renderHistory();
+    else if (state.tab==='reports') content = renderReports();
 
-  root.innerHTML = `
-    ${renderTopbar()}
-    <main>${content}</main>
-    ${renderBottomnav()}
-    ${renderModal()}
-    ${state.toast ? `<div class="toast">${state.toast}</div>` : ''}
-  `;
+    root.innerHTML = `
+      ${renderTopbar()}
+      <main>${content}</main>
+      ${renderBottomnav()}
+      ${renderModal()}
+      ${state.toast ? `<div class="toast">${state.toast}</div>` : ''}
+    `;
+  }
+
+  if (focusInfo && focusInfo.id){
+    const el = document.getElementById(focusInfo.id);
+    if (el){
+      el.focus({ preventScroll: true });
+      if (typeof focusInfo.start === 'number'){
+        try{ el.setSelectionRange(focusInfo.start, focusInfo.end); }catch(e){}
+      }
+    }
+  }
 }
 
 render();
