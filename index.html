@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>گیم‌نت</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
   :root{
     --bg:#0f1115; --card:#181b21; --elev:#20242c; --text:#eef1f5; --dim:#9aa3b2;
@@ -292,10 +293,100 @@ async function settleHistorySession(sessionId){
   showToast('تسویه شد');
   render();
 }
+async function nextCustomerCode(){
+  const rows = await sb('customers?select=code&order=id.desc&limit=1');
+  let n = 0;
+  if (rows.length && /^M-(\d+)$/.test(rows[0].code)) n = parseInt(rows[0].code.slice(2), 10);
+  return 'M-' + String(n+1).padStart(4,'0');
+}
 async function createCustomer(name, phone){
-  const rows = await sb('customers', { method:'POST', body:{ name, phone: phone||null } });
+  const code = await nextCustomerCode();
+  const rows = await sb('customers', { method:'POST', body:{ name, phone: phone||null, code } });
   await loadCustomers();
   return rows[0];
+}
+async function loadCustomerSessions(customerId){
+  return sb('sessions?customer_id=eq.'+customerId+'&select=*&order=start_at.desc');
+}
+function openCustomerDetail(customerId){
+  openModal({type:'customerDetail', customerId, loadingDetail:true});
+  const c = customer(customerId);
+  state.modal.editName = c.name;
+  state.modal.editCode = c.code;
+  safe(async()=>{
+    state.modal.sessions = await loadCustomerSessions(customerId);
+    state.modal.loadingDetail = false;
+    render();
+  });
+}
+async function saveCustomerInfo(customerId){
+  const name = (state.modal.editName||'').trim();
+  const code = (state.modal.editCode||'').trim();
+  if (!name || !code){ showToast('نام و کد را وارد کنید'); return; }
+  try{
+    await sb('customers?id=eq.'+customerId, { method:'PATCH', body:{ name, code } });
+    await loadCustomers();
+    showToast('اطلاعات ذخیره شد');
+    render();
+  }catch(e){
+    showToast(String(e.message).includes('23505') ? 'این کد قبلاً برای مشتری دیگری استفاده شده' : (e.message || 'خطا رخ داد'));
+  }
+}
+async function setCustomerDebt(customerId, newDebt){
+  const val = Math.max(0, Number(newDebt||0));
+  await sb('customers?id=eq.'+customerId, { method:'PATCH', body:{ debt: val } });
+  await loadCustomers();
+  showToast('بدهی به‌روزرسانی شد');
+  render();
+}
+async function settleFromCustomerDetail(sessionId, customerId){
+  await settleHistorySession(sessionId);
+  if (state.modal && state.modal.type==='customerDetail' && state.modal.customerId===customerId){
+    state.modal.sessions = await loadCustomerSessions(customerId);
+    render();
+  }
+}
+async function printCustomerInvoice(customerId){
+  const m = state.modal;
+  const from = m.invoiceFrom, to = m.invoiceTo;
+  if (!from || !to){ showToast('بازه تاریخ را انتخاب کنید'); return; }
+  if (typeof html2canvas !== 'function'){ showToast('کتابخانهٔ تصویرسازی بارگذاری نشد؛ اتصال اینترنت را بررسی کنید'); return; }
+  const fromD = new Date(from+'T00:00:00');
+  const toD = new Date(to+'T23:59:59');
+  const c = customer(customerId);
+  const rows = (m.sessions||[]).filter(s=> s.status==='completed' && new Date(s.end_at)>=fromD && new Date(s.end_at)<=toD);
+  if (!rows.length){ showToast('فاکتوری در این بازه یافت نشد'); return; }
+  const total = rows.reduce((a,s)=>a+Number(s.total_cost||0),0);
+  const box = document.createElement('div');
+  box.style.position='fixed'; box.style.left='-9999px'; box.style.top='0';
+  box.style.width='380px'; box.style.background='#0f1115'; box.style.color='#eef1f5';
+  box.style.fontFamily='Tahoma,Vazirmatn,sans-serif'; box.style.direction='rtl'; box.style.padding='20px';
+  box.innerHTML = `
+    <div style="text-align:center;font-size:18px;font-weight:bold;margin-bottom:4px">🎮 گیم‌نت</div>
+    <div style="text-align:center;font-size:12px;color:#9aa3b2;margin-bottom:14px">فاکتور دوره‌ای</div>
+    <div style="font-size:13px;margin-bottom:4px"><b>مشتری:</b> ${c.name} (${c.code})</div>
+    <div style="font-size:13px;margin-bottom:14px"><b>بازه:</b> ${fromD.toLocaleDateString('fa-IR')} تا ${toD.toLocaleDateString('fa-IR')}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <tr style="border-bottom:1px solid #2a2f3a"><td style="padding:4px">تاریخ</td><td style="padding:4px">مدت</td><td style="padding:4px;text-align:left">مبلغ</td></tr>
+      ${rows.map(s=>`<tr style="border-bottom:1px solid #2a2f3a"><td style="padding:4px">${fmtDate(s.end_at)}</td><td style="padding:4px">${fmtDur(new Date(s.end_at)-new Date(s.start_at))}</td><td style="padding:4px;text-align:left">${toman(s.total_cost)}</td></tr>`).join('')}
+    </table>
+    <div style="display:flex;justify-content:space-between;margin-top:14px;font-size:15px;font-weight:bold">
+      <span>جمع کل</span><span>${toman(total)}</span>
+    </div>
+  `;
+  document.body.appendChild(box);
+  try{
+    const canvas = await html2canvas(box, {backgroundColor:'#0f1115', scale:2});
+    const dataUrl = canvas.toDataURL('image/png');
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = 'invoice-'+c.code+'-'+from+'-to-'+to+'.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    box.remove();
+  }
 }
 async function saveDeviceType(id, prices){
   await sb('device_types?id=eq.'+id, { method:'PATCH', body:{
@@ -463,12 +554,12 @@ function renderDashboard(){
 
 function renderCustomers(){
   const rows = state.customers.map(c=>`
-    <div class="listitem">
+    <div class="listitem" style="cursor:pointer" onclick="openCustomerDetail(${c.id})">
       <div class="row">
         <div><b>${c.name}</b> <span class="muted">${c.code}</span>${c.phone?`<div class="muted">${c.phone}</div>`:''}</div>
         <div>
           ${Number(c.debt)>0
-            ? `<button class="btn warning small" onclick="openModal({type:'settle', customerId:${c.id}})">بدهی: ${toman(c.debt)}</button>`
+            ? `<span class="badge unpaid">بدهی: ${toman(c.debt)}</span>`
             : `<span class="muted">بدهی ندارد</span>`}
         </div>
       </div>
@@ -687,6 +778,77 @@ function renderModal(){
         await createCustomer(n, (state.modal.phone||'').trim());
         closeModal();
       })">ثبت مشتری</button>`;
+  }
+  else if (m.type==='customerDetail'){
+    const c = customer(m.customerId);
+    if (m.loadingDetail || !c){
+      body = `<div class="head"><h3>اطلاعات مشتری</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
+        <div class="muted" style="padding:20px;text-align:center">در حال بارگذاری...</div>`;
+    } else {
+      const sessions = m.sessions || [];
+      const completed = sessions.filter(s=>s.status==='completed');
+      const totalHoursMs = completed.reduce((a,s)=>a+(new Date(s.end_at)-new Date(s.start_at)),0);
+      const totalPaid = completed.filter(s=>s.paid).reduce((a,s)=>a+Number(s.total_cost||0),0);
+      const unpaidSessions = completed.filter(s=>!s.paid);
+      const historyRows = completed.map(s=>{
+        const d = device(s.device_id);
+        const badgeClass = s.payment_type==='card'?'card':(s.payment_type==='cash'?'cash':(s.paid?'settled':'unpaid'));
+        const badgeText = s.payment_type==='card'?'کارتخوان':(s.payment_type==='cash'?'نقدی':(s.paid?'تسویه‌شده':'پرداخت‌نشده'));
+        return `<div class="listitem">
+          <div class="row"><b>${d?d.name:s.device_id}</b><span class="muted">${fmtDate(s.end_at)}</span></div>
+          <div class="muted">${s.players} نفره · ${fmtDur(new Date(s.end_at)-new Date(s.start_at))}</div>
+          <div class="row" style="margin-top:4px"><span class="badge ${badgeClass}">${badgeText}</span><b>${toman(s.total_cost)}</b></div>
+        </div>`;
+      }).join('') || '<div class="muted">سابقه‌ای ثبت نشده</div>';
+      const debtRows = unpaidSessions.map(s=>{
+        const d = device(s.device_id);
+        return `<div class="listitem row">
+          <span>${d?d.name:s.device_id} · ${fmtDate(s.end_at)}</span>
+          <span><b>${toman(s.total_cost)}</b> <button class="btn warning small" onclick="safe(()=>settleFromCustomerDetail(${s.id}, ${m.customerId}))">تسویه</button></span>
+        </div>`;
+      }).join('') || '<div class="muted">بدهی معوقی ثبت نشده</div>';
+
+      body = `
+        <div class="head"><h3>اطلاعات مشتری</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
+
+        <label>نام و نام خانوادگی</label>
+        <input type="text" id="custEditName" value="${m.editName||''}" oninput="state.modal.editName=this.value">
+        <label style="margin-top:8px">کد یکتا</label>
+        <input type="text" id="custEditCode" value="${m.editCode||''}" oninput="state.modal.editCode=this.value">
+        <button class="btn block" style="margin-top:10px" onclick="saveCustomerInfo(${m.customerId})">ذخیره تغییرات</button>
+
+        <div class="card" style="margin-top:16px">
+          <h3>خلاصه</h3>
+          <table class="rep">
+            <tr><td>کل ساعت بازی</td><td>${fmtDur(totalHoursMs)}</td></tr>
+            <tr><td>کل مبلغ پرداختی</td><td>${toman(totalPaid)}</td></tr>
+            <tr><td>بدهی فعلی</td><td>${toman(c.debt)}</td></tr>
+          </table>
+        </div>
+
+        <div class="card" style="margin-top:12px">
+          <h3>ریز بدهی</h3>
+          ${debtRows}
+          <label style="margin-top:10px">ثبت دستی مقدار بدهی</label>
+          <input type="number" id="manualDebt" value="${m.manualDebt!==undefined?m.manualDebt:c.debt}" oninput="state.modal.manualDebt=this.value">
+          <button class="btn secondary block" style="margin-top:8px" onclick="safe(()=>setCustomerDebt(${m.customerId}, state.modal.manualDebt!==undefined?state.modal.manualDebt:${c.debt}))">ذخیره مقدار بدهی</button>
+        </div>
+
+        <div class="card" style="margin-top:12px">
+          <h3>چاپ فاکتور بازه‌ای</h3>
+          <div class="row" style="gap:8px">
+            <div style="flex:1"><label>از تاریخ</label><input type="date" id="invFrom" value="${m.invoiceFrom||''}" oninput="state.modal.invoiceFrom=this.value"></div>
+            <div style="flex:1"><label>تا تاریخ</label><input type="date" id="invTo" value="${m.invoiceTo||''}" oninput="state.modal.invoiceTo=this.value"></div>
+          </div>
+          <button class="btn success block" style="margin-top:10px" onclick="safe(()=>printCustomerInvoice(${m.customerId}))">دانلود فاکتور (تصویر)</button>
+        </div>
+
+        <div class="card" style="margin-top:12px">
+          <h3>سابقهٔ بازی‌ها</h3>
+          ${historyRows}
+        </div>
+      `;
+    }
   }
   return `<div class="overlay" onclick="if(event.target===this) closeModal()"><div class="sheet">${body}</div></div>`;
 }
