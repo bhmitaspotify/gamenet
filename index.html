@@ -223,15 +223,29 @@ async function changePassword(newPass){
 }
 
 // ---------- Session actions ----------
-async function startSession({deviceId, customerId, players}){
+async function startSession({deviceId, customerIds, players}){
   const d = device(deviceId);
   const rate = rateFor(d.type_id, players);
+  const ids = customerIds.filter(Boolean);
   await sb('sessions', { method:'POST', body:{
-    device_id: deviceId, customer_id: customerId, players, hourly_rate: rate,
+    device_id: deviceId, customer_id: ids[0], customer_ids: ids.length>1 ? ids : null, players, hourly_rate: rate,
     start_at: new Date().toISOString(), status:'active', staff_username: state.staff.username,
   }});
   await loadActiveSessions();
   closeModal();
+  render();
+}
+async function pauseSession(sessionId){
+  await sb('sessions?id=eq.'+sessionId, { method:'PATCH', body:{ paused_at: new Date().toISOString() } });
+  await loadActiveSessions();
+  render();
+}
+async function resumeSession(sessionId){
+  const s = state.activeSessions.find(x=>x.id===sessionId);
+  if (!s || !s.paused_at) return;
+  const addedMs = Date.now() - new Date(s.paused_at).getTime();
+  await sb('sessions?id=eq.'+sessionId, { method:'PATCH', body:{ paused_ms: Number(s.paused_ms||0) + addedMs, paused_at: null } });
+  await loadActiveSessions();
   render();
 }
 async function addCafeItem(sessionId, name, price){
@@ -251,8 +265,13 @@ async function removeCafeItem(sessionId, idx){
   await loadActiveSessions();
   render();
 }
+function elapsedMs(s){
+  const pausedMs = Number(s.paused_ms||0);
+  if (s.paused_at) return Math.max(0, new Date(s.paused_at).getTime() - new Date(s.start_at).getTime() - pausedMs);
+  return Math.max(0, Date.now() - new Date(s.start_at).getTime() - pausedMs);
+}
 function liveCost(s){
-  const hours = (Date.now() - new Date(s.start_at).getTime()) / 3600000;
+  const hours = elapsedMs(s) / 3600000;
   return hours * s.hourly_rate;
 }
 async function endSession(sessionId, paymentType){
@@ -275,6 +294,39 @@ async function endSession(sessionId, paymentType){
   showToast('فاکتور ثبت شد: ' + toman(total));
   render();
 }
+async function endSessionSplit(sessionId){
+  const m = state.modal;
+  const s = state.activeSessions.find(x=>x.id===sessionId);
+  const ids = s.customer_ids || [s.customer_id];
+  const n = ids.length;
+  const choices = m.splitChoices || [];
+  if (choices.filter(Boolean).length < n){ showToast('برای همهٔ نفرات نوع پرداخت را انتخاب کنید'); return; }
+  const playCost = liveCost(s);
+  const cafeCost = s.cafe_cost || 0;
+  const total = playCost + cafeCost;
+  const baseShare = Math.floor(total / n);
+  const nowIso = new Date().toISOString();
+  for (let i=0;i<n;i++){
+    const share = i===n-1 ? (total - baseShare*(n-1)) : baseShare;
+    const paymentType = choices[i];
+    const paid = paymentType !== 'unpaid';
+    await sb('sessions', { method:'POST', body:{
+      device_id: s.device_id, customer_id: ids[i], players: n, hourly_rate: s.hourly_rate,
+      start_at: s.start_at, end_at: nowIso, status:'completed',
+      play_cost: Math.round(playCost/n), cafe_cost: Math.round(cafeCost/n), total_cost: share,
+      payment_type: paymentType, paid, staff_username: state.staff.username,
+    }});
+    if (!paid){
+      const c = customer(ids[i]) || (await sb('customers?id=eq.'+ids[i]+'&select=*'))[0];
+      await sb('customers?id=eq.'+ids[i], { method:'PATCH', body:{ debt: Number(c.debt||0) + share } });
+    }
+  }
+  await sb('sessions?id=eq.'+sessionId, { method:'DELETE' });
+  await Promise.all([loadActiveSessions(), loadCustomers()]);
+  closeModal();
+  showToast('دنگی ثبت شد');
+  render();
+}
 async function settleDebt(customerId, amount){
   const c = customer(customerId);
   const newDebt = Math.max(0, Number(c.debt||0) - amount);
@@ -293,11 +345,48 @@ async function settleHistorySession(sessionId){
   showToast('تسویه شد');
   render();
 }
+function isAdmin(){
+  return !!state.staff && state.staff.username === 'arvin';
+}
+async function deleteSessionRecord(sessionId){
+  if (!isAdmin()) return;
+  if (!confirm('این فاکتور برای همیشه حذف می‌شود. مطمئن هستید؟')) return;
+  const rows = await sb('sessions?id=eq.'+sessionId+'&select=*');
+  const s = rows[0];
+  if (!s){ showToast('فاکتور پیدا نشد'); return; }
+  if (s.payment_type==='unpaid' && !s.paid){
+    const c = (await sb('customers?id=eq.'+s.customer_id+'&select=*'))[0];
+    if (c) await sb('customers?id=eq.'+s.customer_id, { method:'PATCH', body:{ debt: Math.max(0, Number(c.debt||0) - Number(s.total_cost||0)) } });
+  }
+  await sb('sessions?id=eq.'+sessionId, { method:'DELETE' });
+  await Promise.all([loadHistory(), loadCustomers()]);
+  if (state.modal && state.modal.type==='customerDetail'){
+    state.modal.sessions = await loadCustomerSessions(state.modal.customerId);
+  }
+  showToast('فاکتور حذف شد');
+  render();
+}
+async function deleteCustomerRecord(customerId){
+  if (!isAdmin()) return;
+  if (!confirm('این مشتری برای همیشه حذف می‌شود. مطمئن هستید؟')) return;
+  try{
+    await sb('customers?id=eq.'+customerId, { method:'DELETE' });
+    closeModal();
+    await loadCustomers();
+    showToast('مشتری حذف شد');
+    render();
+  }catch(e){
+    showToast(String(e.message).includes('23503') ? 'این مشتری سابقهٔ بازی دارد؛ اول فاکتورهای او را حذف کنید' : (e.message || 'خطا رخ داد'));
+  }
+}
 async function nextCustomerCode(){
-  const rows = await sb('customers?select=code&order=id.desc&limit=1');
-  let n = 0;
-  if (rows.length && /^M-(\d+)$/.test(rows[0].code)) n = parseInt(rows[0].code.slice(2), 10);
-  return 'M-' + String(n+1).padStart(4,'0');
+  const rows = await sb('customers?select=code&limit=1000');
+  let maxN = 0;
+  for (const r of rows){
+    const match = /^M-(\d+)$/.exec(r.code);
+    if (match) maxN = Math.max(maxN, parseInt(match[1], 10));
+  }
+  return 'M-' + String(maxN+1).padStart(4,'0');
 }
 async function createCustomer(name, phone){
   const code = await nextCustomerCode();
@@ -313,6 +402,7 @@ function openCustomerDetail(customerId){
   const c = customer(customerId);
   state.modal.editName = c.name;
   state.modal.editCode = c.code;
+  state.modal.editPhone = c.phone || '';
   safe(async()=>{
     state.modal.sessions = await loadCustomerSessions(customerId);
     state.modal.loadingDetail = false;
@@ -322,9 +412,10 @@ function openCustomerDetail(customerId){
 async function saveCustomerInfo(customerId){
   const name = (state.modal.editName||'').trim();
   const code = (state.modal.editCode||'').trim();
+  const phone = (state.modal.editPhone||'').trim();
   if (!name || !code){ showToast('نام و کد را وارد کنید'); return; }
   try{
-    await sb('customers?id=eq.'+customerId, { method:'PATCH', body:{ name, code } });
+    await sb('customers?id=eq.'+customerId, { method:'PATCH', body:{ name, code, phone: phone||null } });
     await loadCustomers();
     showToast('اطلاعات ذخیره شد');
     render();
@@ -533,18 +624,24 @@ function renderDashboard(){
         <button class="btn success block" onclick="openModal({type:'start', deviceId:'${d.id}'})">شروع بازی</button>
       </div>`;
     }
-    const c = customer(s.customer_id);
-    const elapsed = Date.now() - new Date(s.start_at).getTime();
+    const ids = s.customer_ids || [s.customer_id];
+    const names = ids.map(id=>{ const cc = customer(id); return cc ? cc.name+' ('+cc.code+')' : '...'; }).join('، ');
+    const elapsed = elapsedMs(s);
     const cost = liveCost(s) + Number(s.cafe_cost||0);
+    const isPaused = !!s.paused_at;
     return `<div class="card">
       <div class="row"><h3>${d.name}</h3><span class="muted">${t?t.label:''} · ${s.players} نفره</span></div>
-      <div class="muted">مشتری: ${c? c.name+' ('+c.code+')' : '...'}</div>
+      <div class="muted">مشتری: ${names}</div>
       <div class="row" style="margin-top:8px;">
-        <span class="big">${fmtDur(elapsed)}</span>
+        <span class="big">${fmtDur(elapsed)}${isPaused?' ⏸':''}</span>
         <span class="big">${toman(cost)}</span>
       </div>
+      ${isPaused ? `<div class="muted" style="color:var(--warning);margin-top:4px">بازی متوقف شده</div>` : ''}
       <div class="row" style="margin-top:10px;gap:8px;">
         <button class="btn secondary small" style="flex:1" onclick="openModal({type:'cafe', sessionId:${s.id}})">➕ سفارش کافه</button>
+        ${isPaused
+          ? `<button class="btn success small" style="flex:1" onclick="safe(()=>resumeSession(${s.id}))">▶️ ادامه</button>`
+          : `<button class="btn warning small" style="flex:1" onclick="safe(()=>pauseSession(${s.id}))">⏸ توقف</button>`}
         <button class="btn danger small" style="flex:1" onclick="openModal({type:'end', sessionId:${s.id}})">پایان بازی</button>
       </div>
     </div>`;
@@ -621,6 +718,7 @@ function renderHistory(){
         <b>${toman(s.total_cost)}</b>
       </div>
       ${(!s.paid) ? `<button class="btn warning small block" style="margin-top:8px" onclick="safe(()=>settleHistorySession(${s.id}))">علامت‌گذاری به‌عنوان تسویه‌شده</button>` : ''}
+      ${isAdmin() ? `<button class="btn danger small block" style="margin-top:6px" onclick="safe(()=>deleteSessionRecord(${s.id}))">حذف این فاکتور</button>` : ''}
     </div>`;
   }).join('') || `<div class="muted">فاکتوری ثبت نشده</div>`;
   return `<div class="card">${rows}</div>`;
@@ -692,28 +790,51 @@ function renderModal(){
   }
   else if (m.type==='start'){
     const players = m.players || 1;
+    if (!m.customerIds) m.customerIds = [];
+    if (!m.slotQueries) m.slotQueries = [];
+    let activeSlot = m.activeSlot;
+    if (activeSlot===undefined){
+      activeSlot = -1;
+      for (let i=0;i<players;i++){ if (!m.customerIds[i]){ activeSlot = i; break; } }
+    }
+    const slot = activeSlot===-1 ? null : activeSlot;
     const filtered = state.customers;
+    const query = m.slotQueries[slot] || '';
+    const allFilled = Array.from({length:players}).every((_,i)=>m.customerIds[i]);
+
+    const slotSummaries = Array.from({length: players}).map((_,i)=>{
+      const cid = m.customerIds[i];
+      const cc = cid ? customer(cid) : null;
+      if (!cc || i===slot) return '';
+      return `<div class="listitem row">
+        <span>نفر ${i+1}: <b>${cc.name}</b> <span class="muted">${cc.code}</span></span>
+        <button class="btn secondary small" onclick="state.modal.activeSlot=${i}; render()">تغییر</button>
+      </div>`;
+    }).join('');
+
     body = `
       <div class="head"><h3>شروع بازی — ${m.deviceId}</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
       <label>تعداد نفرات</label>
       <div class="grid4">
-        ${[1,2,3,4].map(p=>`<div class="pill ${p===players?'active':''}" onclick="state.modal.players=${p}; render()">${p} نفره</div>`).join('')}
+        ${[1,2,3,4].map(p=>`<div class="pill ${p===players?'active':''}" onclick="state.modal.players=${p}; state.modal.activeSlot=undefined; render()">${p} نفره</div>`).join('')}
       </div>
-      <label style="margin-top:12px">مشتری</label>
-      <input type="text" placeholder="جستجو یا نام جدید..." id="startCustSearch" value="${m.custQuery||''}" oninput="state.modal.custQuery=this.value; render()">
-      <div style="max-height:160px;overflow:auto;margin-top:6px">
-        ${filtered.filter(c=> !m.custQuery || c.name.includes(m.custQuery) || (c.code||'').includes(m.custQuery)).slice(0,20).map(c=>`
-          <div class="listitem row" style="cursor:pointer" onclick="state.modal.customerId=${c.id}; render()">
-            <span>${c.name} <span class="muted">${c.code}</span></span>
-            ${m.customerId===c.id?'✅':''}
-          </div>`).join('')}
-      </div>
-      ${m.custQuery && !filtered.some(c=>c.name===m.custQuery) ? `
-        <button class="btn secondary block" style="margin-top:8px" onclick="safe(async()=>{ const c=await createCustomer(state.modal.custQuery, ''); state.modal.customerId=c.id; state.modal.custQuery=c.name; render(); })">
-          + ثبت «${m.custQuery}» به‌عنوان مشتری جدید
-        </button>` : ''}
-      <button class="btn success block" style="margin-top:14px" ${m.customerId?'':'disabled'}
-        onclick="safe(()=>startSession({deviceId:'${m.deviceId}', customerId: state.modal.customerId, players: state.modal.players||1}))">
+      ${slotSummaries}
+      ${slot!==null ? `
+        <label style="margin-top:12px">مشتری — نفر ${slot+1}</label>
+        <input type="text" placeholder="جستجو یا نام جدید..." id="startCustSearch" value="${query}" oninput="state.modal.slotQueries=state.modal.slotQueries||[]; state.modal.slotQueries[${slot}]=this.value; render()">
+        <div style="max-height:160px;overflow:auto;margin-top:6px">
+          ${filtered.filter(c=> !query || c.name.includes(query) || (c.code||'').includes(query)).slice(0,20).map(c=>`
+            <div class="listitem row" style="cursor:pointer" onclick="state.modal.customerIds=state.modal.customerIds||[]; state.modal.customerIds[${slot}]=${c.id}; state.modal.activeSlot=undefined; render()">
+              <span>${c.name} <span class="muted">${c.code}</span></span>
+            </div>`).join('')}
+        </div>
+        ${query && !filtered.some(c=>c.name===query) ? `
+          <button class="btn secondary block" style="margin-top:8px" onclick="safe(async()=>{ const c=await createCustomer(state.modal.slotQueries[${slot}], ''); state.modal.customerIds=state.modal.customerIds||[]; state.modal.customerIds[${slot}]=c.id; state.modal.activeSlot=undefined; render(); })">
+            + ثبت «${query}» به‌عنوان مشتری جدید
+          </button>` : ''}
+      ` : ''}
+      <button class="btn success block" style="margin-top:14px" ${allFilled?'':'disabled'}
+        onclick="safe(()=>startSession({deviceId:'${m.deviceId}', customerIds: state.modal.customerIds.slice(0,${players}), players: ${players}}))">
         شروع بازی
       </button>`;
   }
@@ -743,20 +864,47 @@ function renderModal(){
     const playCost = s ? liveCost(s) : 0;
     const cafeCost = s ? (s.cafe_cost||0) : 0;
     const total = playCost + cafeCost;
-    body = `
-      <div class="head"><h3>پایان بازی</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
-      <table class="rep">
-        <tr><td>مدت بازی</td><td>${fmtDur(Date.now()-new Date(s.start_at).getTime())}</td></tr>
-        <tr><td>هزینه بازی</td><td>${toman(playCost)}</td></tr>
-        <tr><td>سفارش کافه</td><td>${toman(cafeCost)}</td></tr>
-        <tr><td><b>جمع کل</b></td><td><b>${toman(total)}</b></td></tr>
-      </table>
-      <label style="margin-top:12px">نوع پرداخت</label>
-      <div class="col">
-        <button class="btn block" onclick="safe(()=>endSession(${m.sessionId}, 'card'))">💳 کارتخوان</button>
-        <button class="btn success block" onclick="safe(()=>endSession(${m.sessionId}, 'cash'))">💵 نقدی</button>
-        <button class="btn danger block" onclick="safe(()=>endSession(${m.sessionId}, 'unpaid'))">⏳ پرداخت‌نشده (بدهی)</button>
-      </div>`;
+    const ids = s ? (s.customer_ids || [s.customer_id]) : [];
+    if (m.splitMode && ids.length>1){
+      const n = ids.length;
+      const baseShare = Math.floor(total/n);
+      const choices = m.splitChoices || [];
+      const rows = ids.map((cid,i)=>{
+        const cc = customer(cid);
+        const share = i===n-1 ? (total - baseShare*(n-1)) : baseShare;
+        const choice = choices[i];
+        return `<div class="card" style="margin-bottom:8px">
+          <div class="row"><b>${cc?cc.name:'مشتری '+(i+1)}</b><b>${toman(share)}</b></div>
+          <div class="row" style="margin-top:8px;gap:6px">
+            <button class="btn ${choice==='card'?'':'secondary'} small" style="flex:1" onclick="state.modal.splitChoices=state.modal.splitChoices||[]; state.modal.splitChoices[${i}]='card'; render()">💳 کارتخوان</button>
+            <button class="btn ${choice==='cash'?'success':'secondary'} small" style="flex:1" onclick="state.modal.splitChoices=state.modal.splitChoices||[]; state.modal.splitChoices[${i}]='cash'; render()">💵 نقدی</button>
+            <button class="btn ${choice==='unpaid'?'danger':'secondary'} small" style="flex:1" onclick="state.modal.splitChoices=state.modal.splitChoices||[]; state.modal.splitChoices[${i}]='unpaid'; render()">⏳ بدهی</button>
+          </div>
+        </div>`;
+      }).join('');
+      body = `
+        <div class="head"><h3>تقسیم هزینه (دنگی)</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
+        <div class="muted" style="margin-bottom:10px">جمع کل: ${toman(total)} — تقسیم بر ${n} نفر</div>
+        ${rows}
+        <button class="btn secondary block" style="margin-top:6px" onclick="state.modal.splitMode=false; render()">بازگشت</button>
+        <button class="btn success block" style="margin-top:8px" onclick="safe(()=>endSessionSplit(${m.sessionId}))">ثبت نهایی دنگی</button>`;
+    } else {
+      body = `
+        <div class="head"><h3>پایان بازی</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
+        <table class="rep">
+          <tr><td>مدت بازی</td><td>${fmtDur(elapsedMs(s))}</td></tr>
+          <tr><td>هزینه بازی</td><td>${toman(playCost)}</td></tr>
+          <tr><td>سفارش کافه</td><td>${toman(cafeCost)}</td></tr>
+          <tr><td><b>جمع کل</b></td><td><b>${toman(total)}</b></td></tr>
+        </table>
+        <label style="margin-top:12px">نوع پرداخت</label>
+        <div class="col">
+          <button class="btn block" onclick="safe(()=>endSession(${m.sessionId}, 'card'))">💳 کارتخوان</button>
+          <button class="btn success block" onclick="safe(()=>endSession(${m.sessionId}, 'cash'))">💵 نقدی</button>
+          <button class="btn danger block" onclick="safe(()=>endSession(${m.sessionId}, 'unpaid'))">⏳ پرداخت‌نشده (بدهی)</button>
+        </div>
+        ${ids.length>1 ? `<button class="btn secondary block" style="margin-top:10px" onclick="state.modal.splitMode=true; render()">➗ دنگی (تقسیم بین ${ids.length} نفر)</button>` : ''}`;
+    }
   }
   else if (m.type==='settle'){
     const c = customer(m.customerId);
@@ -798,6 +946,7 @@ function renderModal(){
           <div class="row"><b>${d?d.name:s.device_id}</b><span class="muted">${fmtDate(s.end_at)}</span></div>
           <div class="muted">${s.players} نفره · ${fmtDur(new Date(s.end_at)-new Date(s.start_at))}</div>
           <div class="row" style="margin-top:4px"><span class="badge ${badgeClass}">${badgeText}</span><b>${toman(s.total_cost)}</b></div>
+          ${isAdmin() ? `<button class="btn danger small block" style="margin-top:6px" onclick="safe(()=>deleteSessionRecord(${s.id}))">حذف این فاکتور</button>` : ''}
         </div>`;
       }).join('') || '<div class="muted">سابقه‌ای ثبت نشده</div>';
       const debtRows = unpaidSessions.map(s=>{
@@ -815,7 +964,10 @@ function renderModal(){
         <input type="text" id="custEditName" value="${m.editName||''}" oninput="state.modal.editName=this.value">
         <label style="margin-top:8px">کد یکتا</label>
         <input type="text" id="custEditCode" value="${m.editCode||''}" oninput="state.modal.editCode=this.value">
+        <label style="margin-top:8px">شماره موبایل</label>
+        <input type="tel" id="custEditPhone" value="${m.editPhone||''}" oninput="state.modal.editPhone=this.value">
         <button class="btn block" style="margin-top:10px" onclick="saveCustomerInfo(${m.customerId})">ذخیره تغییرات</button>
+        ${isAdmin() ? `<button class="btn danger block" style="margin-top:8px" onclick="safe(()=>deleteCustomerRecord(${m.customerId}))">حذف این مشتری</button>` : ''}
 
         <div class="card" style="margin-top:16px">
           <h3>خلاصه</h3>
