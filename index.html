@@ -777,14 +777,14 @@ function renderModal(){
     body = `
       <div class="head"><h3>ورود ${label}</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
       <label>رمز عبور</label>
-      <input type="password" id="loginPass" inputmode="numeric" value="${m.pass||''}" oninput="state.modal.pass=this.value">
+      <input type="password" id="loginPass" value="${m.pass||''}" oninput="state.modal.pass=this.value">
       <button class="btn block" style="margin-top:12px" onclick="safe(()=>login('${m.user}', state.modal.pass||''))">ورود</button>`;
   }
   else if (m.type==='profile'){
     body = `
       <div class="head"><h3>${state.staff.display_name}</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
       <label>رمز جدید</label>
-      <input type="password" id="newPass" inputmode="numeric" value="${m.newPass||''}" oninput="state.modal.newPass=this.value">
+      <input type="password" id="newPass" value="${m.newPass||''}" oninput="state.modal.newPass=this.value">
       <button class="btn block" style="margin-top:10px" onclick="safe(()=>changePassword(state.modal.newPass||''))">تغییر رمز</button>
       <button class="btn danger block" style="margin-top:10px" onclick="logout(); closeModal();">خروج از حساب</button>`;
   }
