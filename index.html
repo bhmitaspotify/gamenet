@@ -389,10 +389,17 @@ async function nextCustomerCode(){
   return 'M-' + String(maxN+1).padStart(4,'0');
 }
 async function createCustomer(name, phone){
-  const code = await nextCustomerCode();
-  const rows = await sb('customers', { method:'POST', body:{ name, phone: phone||null, code } });
-  await loadCustomers();
-  return rows[0];
+  for (let attempt=0; attempt<3; attempt++){
+    const code = await nextCustomerCode();
+    try{
+      const rows = await sb('customers', { method:'POST', body:{ name, phone: phone||null, code } });
+      await loadCustomers();
+      return rows[0];
+    }catch(e){
+      if (String(e.message).includes('23505') && attempt<2) continue;
+      throw e;
+    }
+  }
 }
 async function loadCustomerSessions(customerId){
   return sb('sessions?customer_id=eq.'+customerId+'&select=*&order=start_at.desc');
@@ -829,8 +836,18 @@ function renderModal(){
             </div>`).join('')}
         </div>
         ${query && !filtered.some(c=>c.name===query) ? `
-          <button class="btn secondary block" style="margin-top:8px" onclick="safe(async()=>{ const c=await createCustomer(state.modal.slotQueries[${slot}], ''); state.modal.customerIds=state.modal.customerIds||[]; state.modal.customerIds[${slot}]=c.id; state.modal.activeSlot=undefined; render(); })">
-            + ثبت «${query}» به‌عنوان مشتری جدید
+          <button class="btn secondary block" style="margin-top:8px" ${m.submitting?'disabled':''} onclick="safe(async()=>{
+            if (state.modal.submitting) return;
+            state.modal.submitting = true; render();
+            try{
+              const c=await createCustomer(state.modal.slotQueries[${slot}], '');
+              state.modal.customerIds=state.modal.customerIds||[]; state.modal.customerIds[${slot}]=c.id; state.modal.activeSlot=undefined;
+            } finally {
+              if (state.modal) state.modal.submitting = false;
+              render();
+            }
+          })">
+            ${m.submitting?'در حال ثبت...':'+ ثبت «'+query+'» به‌عنوان مشتری جدید'}
           </button>` : ''}
       ` : ''}
       <button class="btn success block" style="margin-top:14px" ${allFilled?'':'disabled'}
@@ -920,12 +937,18 @@ function renderModal(){
       <div class="head"><h3>مشتری جدید</h3><button class="closebtn" onclick="closeModal()">✕</button></div>
       <label>نام</label><input type="text" id="newCustName" value="${m.name||''}" oninput="state.modal.name=this.value">
       <label style="margin-top:8px">شماره تماس (اختیاری)</label><input type="tel" id="newCustPhone" value="${m.phone||''}" oninput="state.modal.phone=this.value">
-      <button class="btn block" style="margin-top:12px" onclick="safe(async()=>{
+      <button class="btn block" style="margin-top:12px" ${m.submitting?'disabled':''} onclick="safe(async()=>{
+        if (state.modal.submitting) return;
         const n=(state.modal.name||'').trim();
         if(!n){ showToast('نام را وارد کنید'); return; }
-        await createCustomer(n, (state.modal.phone||'').trim());
-        closeModal();
-      })">ثبت مشتری</button>`;
+        state.modal.submitting = true; render();
+        try{
+          await createCustomer(n, (state.modal.phone||'').trim());
+          closeModal();
+        } finally {
+          if (state.modal) state.modal.submitting = false;
+        }
+      })">${m.submitting?'در حال ثبت...':'ثبت مشتری'}</button>`;
   }
   else if (m.type==='customerDetail'){
     const c = customer(m.customerId);
