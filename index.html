@@ -711,15 +711,21 @@ function saveTypeRates(typeId){
 function renderHistory(){
   const rows = state.history.map(s=>{
     const d = device(s.device_id);
-    const c = customer(s.customer_id);
+    const t = d ? deviceType(d.type_id) : null;
+    const ids = s.customer_ids || [s.customer_id];
+    const names = ids.map(id=>{ const cc = customer(id); return cc ? cc.name+' ('+cc.code+')' : '...'; }).join('، ');
     const badgeClass = s.payment_type==='card'?'card':(s.payment_type==='cash'?'cash':(s.paid?'settled':'unpaid'));
     const badgeText = s.payment_type==='card'?'کارتخوان':(s.payment_type==='cash'?'نقدی':(s.paid?'تسویه‌شده':'پرداخت‌نشده'));
+    const startTime = new Date(s.start_at).toLocaleTimeString('fa-IR',{hour:'2-digit',minute:'2-digit'});
+    const endTime = new Date(s.end_at).toLocaleTimeString('fa-IR',{hour:'2-digit',minute:'2-digit'});
+    const pausedMin = Math.round(Number(s.paused_ms||0)/60000);
     return `<div class="listitem">
       <div class="row">
-        <b>${d?d.name:s.device_id}</b>
+        <b>${d?d.name:s.device_id}${t?' — '+t.label:''}</b>
         <span class="muted">${fmtDate(s.end_at)}</span>
       </div>
-      <div class="muted">${c? c.name+' ('+c.code+')':''} · ${s.players} نفره · ${fmtDur(new Date(s.end_at)-new Date(s.start_at))}</div>
+      <div class="muted">${names} · ${s.players} نفره</div>
+      <div class="muted">${startTime} تا ${endTime} · ${fmtDur(new Date(s.end_at)-new Date(s.start_at))}${pausedMin>0?' · توقف '+pausedMin+' دقیقه':''}</div>
       <div class="row" style="margin-top:6px">
         <span class="badge ${badgeClass}">${badgeText}</span>
         <b>${toman(s.total_cost)}</b>
